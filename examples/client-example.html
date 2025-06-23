@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebSocket Server Client Example</title>
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .container { max-width: 800px; margin: 0 auto; }
+        .section { margin: 20px 0; padding: 15px; border: 1px solid #ddd; border-radius: 5px; }
+        input, textarea, button { margin: 5px; padding: 8px; }
+        button { background: #007bff; color: white; border: none; border-radius: 3px; cursor: pointer; }
+        button:hover { background: #0056b3; }
+        .comment { margin: 10px 0; padding: 10px; background: #f8f9fa; border-radius: 3px; }
+        .reply { margin-left: 20px; }
+        .notification { margin: 5px 0; padding: 8px; background: #d4edda; border-radius: 3px; }
+        .error { color: red; }
+        .success { color: green; }
+        .typing { font-style: italic; color: #666; }
+        #connectionStatus { padding: 10px; border-radius: 3px; margin-bottom: 20px; }
+        .connected { background: #d4edda; }
+        .disconnected { background: #f8d7da; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>WebSocket Server Client Example</h1>
+        
+        <div id="connectionStatus" class="disconnected">
+            <strong>Status:</strong> <span id="status">Disconnected</span>
+        </div>
+
+        <!-- Connection Section -->
+        <div class="section">
+            <h3>Connection</h3>
+            <input type="text" id="serverUrl" placeholder="Server URL" value="http://localhost:3001">
+            <input type="text" id="authToken" placeholder="JWT Token (optional for demo)" value="">
+            <button onclick="connect()">Connect</button>
+            <button onclick="disconnect()">Disconnect</button>
+        </div>
+
+        <!-- Thread Management -->
+        <div class="section">
+            <h3>Thread Management</h3>
+            <input type="text" id="threadId" placeholder="Thread ID" value="demo-thread-123">
+            <select id="threadType">
+                <option value="post">Post</option>
+                <option value="article">Article</option>
+                <option value="discussion">Discussion</option>
+                <option value="task">Task</option>
+            </select>
+            <button onclick="joinThread()">Join Thread</button>
+            <button onclick="leaveThread()">Leave Thread</button>
+        </div>
+
+        <!-- Comment Creation -->
+        <div class="section">
+            <h3>Create Comment</h3>
+            <textarea id="commentContent" placeholder="Write your comment..." rows="3" cols="50"></textarea><br>
+            <input type="text" id="parentId" placeholder="Parent Comment ID (for replies)">
+            <button onclick="createComment()">Post Comment</button>
+        </div>
+
+        <!-- Comments Display -->
+        <div class="section">
+            <h3>Comments</h3>
+            <div id="comments"></div>
+        </div>
+
+        <!-- Notifications -->
+        <div class="section">
+            <h3>Notifications</h3>
+            <button onclick="getNotifications()">Get Notifications</button>
+            <div id="notifications"></div>
+        </div>
+
+        <!-- Typing Indicators -->
+        <div class="section">
+            <h3>Typing Indicators</h3>
+            <div id="typingIndicators"></div>
+        </div>
+
+        <!-- Logs -->
+        <div class="section">
+            <h3>Event Log</h3>
+            <button onclick="clearLogs()">Clear</button>
+            <div id="eventLog" style="height: 200px; overflow-y: scroll; background: #f8f9fa; padding: 10px; border: 1px solid #ddd;"></div>
+        </div>
+    </div>
+
+    <script>
+        let socket = null;
+        let typingTimer = null;
+
+        function log(message, type = 'info') {
+            const logDiv = document.getElementById('eventLog');
+            const timestamp = new Date().toLocaleTimeString();
+            const className = type === 'error' ? 'error' : type === 'success' ? 'success' : '';
+            logDiv.innerHTML += `<div class="${className}">[${timestamp}] ${message}</div>`;
+            logDiv.scrollTop = logDiv.scrollHeight;
+        }
+
+        function clearLogs() {
+            document.getElementById('eventLog').innerHTML = '';
+        }
+
+        function updateConnectionStatus(connected) {
+            const statusDiv = document.getElementById('connectionStatus');
+            const statusSpan = document.getElementById('status');
+            
+            if (connected) {
+                statusDiv.className = 'connected';
+                statusSpan.textContent = 'Connected';
+            } else {
+                statusDiv.className = 'disconnected';
+                statusSpan.textContent = 'Disconnected';
+            }
+        }
+
+        function connect() {
+            const serverUrl = document.getElementById('serverUrl').value;
+            const authToken = document.getElementById('authToken').value;
+
+            if (socket) {
+                socket.disconnect();
+            }
+
+            const options = {
+                transports: ['websocket', 'polling']
+            };
+
+            if (authToken) {
+                options.auth = { token: authToken };
+            } else {
+                // For demo purposes, create a mock token
+                const mockToken = btoa(JSON.stringify({
+                    userId: 'demo-user-' + Math.random().toString(36).substr(2, 9),
+                    username: 'DemoUser',
+                    name: 'Demo User',
+                    email: 'demo@example.com'
+                }));
+                options.auth = { token: mockToken };
+            }
+
+            socket = io(serverUrl, options);
+
+            socket.on('connect', () => {
+                log('Connected to WebSocket server', 'success');
+                updateConnectionStatus(true);
+            });
+
+            socket.on('disconnect', (reason) => {
+                log(`Disconnected: ${reason}`, 'error');
+                updateConnectionStatus(false);
+            });
+
+            socket.on('error', (error) => {
+                log(`Error: ${error.message || error}`, 'error');
+            });
+
+            socket.on('thread_comments', (data) => {
+                log(`Received ${data.comments.length} comments for thread ${data.threadId}`);
+                displayComments(data.comments);
+            });
+
+            socket.on('comment_added', (comment) => {
+                log(`New comment added: ${comment.content.substring(0, 50)}...`, 'success');
+                addCommentToDisplay(comment);
+            });
+
+            socket.on('comment_updated', (comment) => {
+                log(`Comment updated: ${comment.id}`);
+                updateCommentInDisplay(comment);
+            });
+
+            socket.on('comment_deleted', (data) => {
+                log(`Comment deleted: ${data.commentId}`);
+                removeCommentFromDisplay(data.commentId);
+            });
+
+            socket.on('notifications', (notifications) => {
+                log(`Received ${notifications.length} notifications`);
+                displayNotifications(notifications);
+            });
+
+            socket.on('user_typing', (data) => {
+                showTypingIndicator(data);
+            });
+
+            socket.on('user_stopped_typing', (data) => {
+                hideTypingIndicator(data.userId);
+            });
+        }
+
+        function disconnect() {
+            if (socket) {
+                socket.disconnect();
+                socket = null;
+                updateConnectionStatus(false);
+                log('Disconnected by user');
+            }
+        }
+
+        function joinThread() {
+            if (!socket) {
+                log('Not connected to server', 'error');
+                return;
+            }
+
+            const threadId = document.getElementById('threadId').value;
+            const threadType = document.getElementById('threadType').value;
+
+            socket.emit('join_thread', { threadId, threadType });
+            log(`Joining thread: ${threadType}:${threadId}`);
+        }
+
+        function leaveThread() {
+            if (!socket) {
+                log('Not connected to server', 'error');
+                return;
+            }
+
+            const threadId = document.getElementById('threadId').value;
+            const threadType = document.getElementById('threadType').value;
+
+            socket.emit('leave_thread', { threadId, threadType });
+            log(`Leaving thread: ${threadType}:${threadId}`);
+        }
+
+        function createComment() {
+            if (!socket) {
+                log('Not connected to server', 'error');
+                return;
+            }
+
+            const content = document.getElementById('commentContent').value;
+            const threadId = document.getElementById('threadId').value;
+            const threadType = document.getElementById('threadType').value;
+            const parentId = document.getElementById('parentId').value || null;
+
+            if (!content.trim()) {
+                log('Comment content cannot be empty', 'error');
+                return;
+            }
+
+            socket.emit('new_comment', {
+                threadId,
+                threadType,
+                content: content.trim(),
+                parentId
+            });
+
+            document.getElementById('commentContent').value = '';
+            document.getElementById('parentId').value = '';
+            log('Creating comment...');
+        }
+
+        function getNotifications() {
+            if (!socket) {
+                log('Not connected to server', 'error');
+                return;
+            }
+
+            socket.emit('get_notifications');
+            log('Getting notifications...');
+        }
+
+        function displayComments(comments) {
+            const commentsDiv = document.getElementById('comments');
+            commentsDiv.innerHTML = '';
+
+            comments.forEach(comment => {
+                addCommentToDisplay(comment);
+            });
+        }
+
+        function addCommentToDisplay(comment) {
+            const commentsDiv = document.getElementById('comments');
+            const commentDiv = document.createElement('div');
+            commentDiv.className = 'comment';
+            commentDiv.id = `comment-${comment.id}`;
+            
+            commentDiv.innerHTML = `
+                <strong>${comment.userInfo?.username || 'Anonymous'}</strong>
+                <small>(${new Date(comment.createdAt).toLocaleString()})</small>
+                <p>${comment.content}</p>
+                ${comment.replies ? comment.replies.map(reply => 
+                    `<div class="reply">
+                        <strong>${reply.userInfo?.username || 'Anonymous'}</strong>
+                        <small>(${new Date(reply.createdAt).toLocaleString()})</small>
+                        <p>${reply.content}</p>
+                    </div>`
+                ).join('') : ''}
+            `;
+
+            commentsDiv.appendChild(commentDiv);
+        }
+
+        function updateCommentInDisplay(comment) {
+            const commentDiv = document.getElementById(`comment-${comment.id}`);
+            if (commentDiv) {
+                // Update the comment content
+                const contentP = commentDiv.querySelector('p');
+                if (contentP) {
+                    contentP.textContent = comment.content;
+                }
+            }
+        }
+
+        function removeCommentFromDisplay(commentId) {
+            const commentDiv = document.getElementById(`comment-${commentId}`);
+            if (commentDiv) {
+                commentDiv.remove();
+            }
+        }
+
+        function displayNotifications(notifications) {
+            const notificationsDiv = document.getElementById('notifications');
+            notificationsDiv.innerHTML = '';
+
+            notifications.forEach(notification => {
+                const notificationDiv = document.createElement('div');
+                notificationDiv.className = 'notification';
+                notificationDiv.innerHTML = `
+                    <strong>${notification.type}</strong>
+                    <p>${notification.data.content || 'New activity'}</p>
+                    <small>${new Date(notification.createdAt).toLocaleString()}</small>
+                    <button onclick="markNotificationRead('${notification.id}')">Mark Read</button>
+                `;
+                notificationsDiv.appendChild(notificationDiv);
+            });
+        }
+
+        function markNotificationRead(notificationId) {
+            if (socket) {
+                socket.emit('ack_notification', { notificationId });
+                log(`Marking notification ${notificationId} as read`);
+            }
+        }
+
+        function showTypingIndicator(data) {
+            const typingDiv = document.getElementById('typingIndicators');
+            const indicatorId = `typing-${data.userId}`;
+            
+            let indicator = document.getElementById(indicatorId);
+            if (!indicator) {
+                indicator = document.createElement('div');
+                indicator.id = indicatorId;
+                indicator.className = 'typing';
+                typingDiv.appendChild(indicator);
+            }
+            
+            indicator.textContent = `${data.userInfo?.username || 'Someone'} is typing...`;
+        }
+
+        function hideTypingIndicator(userId) {
+            const indicator = document.getElementById(`typing-${userId}`);
+            if (indicator) {
+                indicator.remove();
+            }
+        }
+
+        // Typing indicator for comment input
+        document.getElementById('commentContent').addEventListener('input', function() {
+            if (!socket) return;
+
+            const threadId = document.getElementById('threadId').value;
+            const threadType = document.getElementById('threadType').value;
+
+            if (threadId && threadType) {
+                socket.emit('typing_start', { threadId, threadType });
+
+                clearTimeout(typingTimer);
+                typingTimer = setTimeout(() => {
+                    socket.emit('typing_stop', { threadId, threadType });
+                }, 1000);
+            }
+        });
+
+        // Auto-connect on page load
+        window.onload = function() {
+            log('Page loaded. Click Connect to start.');
+        };
+    </script>
+</body>
+</html> 
