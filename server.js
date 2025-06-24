@@ -1,17 +1,17 @@
-const express = require('express');
-const http = require('http');
-const socketIo = require('socket.io');
-const cors = require('cors');
-const helmet = require('helmet');
-const rateLimit = require('rate-limiter-flexible');
-const jwt = require('jsonwebtoken');
-const Joi = require('joi');
-require('dotenv').config();
+const express = require("express");
+const http = require("http");
+const socketIo = require("socket.io");
+const cors = require("cors");
+const helmet = require("helmet");
+const rateLimit = require("rate-limiter-flexible");
+const jwt = require("jsonwebtoken");
+const Joi = require("joi");
+require("dotenv").config();
 
-const logger = require('./utils/logger');
-const CommentManager = require('./services/CommentManager');
-const NotificationManager = require('./services/NotificationManager');
-const AuthMiddleware = require('./middleware/auth');
+const logger = require("./utils/logger");
+const CommentManager = require("./services/CommentManager");
+const NotificationManager = require("./services/NotificationManager");
+const AuthMiddleware = require("./middleware/auth");
 
 // Initialize Express app
 const app = express();
@@ -21,13 +21,13 @@ const server = http.createServer(app);
 const corsOptions = {
   origin: process.env.CORS_ORIGIN || "https://local.pendo.io:3000",
   methods: ["GET", "POST"],
-  credentials: true
+  credentials: true,
 };
 
 // Initialize Socket.IO with CORS
 const io = socketIo(server, {
   cors: corsOptions,
-  transports: ['websocket', 'polling']
+  transports: ["websocket", "polling"],
 });
 
 // Middleware
@@ -50,120 +50,146 @@ const notificationManager = new NotificationManager();
 const authMiddleware = new AuthMiddleware();
 
 // Health check endpoint
-app.get('/health', (req, res) => {
+app.get("/health", (req, res) => {
   res.json({
-    status: 'healthy',
+    status: "healthy",
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
-    connections: io.engine.clientsCount
+    connections: io.engine.clientsCount,
   });
 });
 
 // Socket.IO connection handling
 //io.use(authMiddleware.socketAuth);
 
-io.on('connection', (socket) => {
+io.on("connection", (socket) => {
   logger.info(`Client connected: ${socket.id}`, {
     userId: socket.userId,
-    userInfo: socket.userInfo
+    userInfo: socket.userInfo,
   });
 
   // Join user to their personal notification room
   socket.join(`user:${socket.userId}`);
 
   // Handle joining comment threads
-  socket.on('join_thread', async (data) => {
+  socket.on("join_thread", async (data) => {
     try {
       const { error, value } = validateJoinThread(data);
       if (error) {
-        socket.emit('error', { message: 'Invalid join thread data', details: error.details });
+        socket.emit("error", {
+          message: "Invalid join thread data",
+          details: error.details,
+        });
         return;
       }
 
       const { threadId, threadType } = value;
       const roomName = `${threadType}:${threadId}`;
-      
+
       await socket.join(roomName);
-      
+
       // Send existing comments for this thread
-      const comments = await commentManager.getCommentsForThread(threadId, threadType);
-      socket.emit('thread_comments', { threadId, threadType, comments });
-      
-      logger.info(`User ${socket.userId} joined thread ${threadId} of type ${threadType}`);
+      const comments = await commentManager.getCommentsForThread(
+        threadId,
+        threadType
+      );
+      socket.emit("thread_comments", { threadId, threadType, comments });
+
+      logger.info(
+        `User ${socket.userId} joined thread ${threadId} of type ${threadType}`
+      );
     } catch (error) {
-      logger.error('Error joining thread:', error);
-      socket.emit('error', { message: 'Failed to join thread' });
+      logger.error("Error joining thread:", error);
+      socket.emit("error", { message: "Failed to join thread" });
     }
   });
 
   // Handle leaving comment threads
-  socket.on('leave_thread', async (data) => {
+  socket.on("leave_thread", async (data) => {
     try {
       const { error, value } = validateLeaveThread(data);
       if (error) {
-        socket.emit('error', { message: 'Invalid leave thread data', details: error.details });
+        socket.emit("error", {
+          message: "Invalid leave thread data",
+          details: error.details,
+        });
         return;
       }
 
       const { threadId, threadType } = value;
       const roomName = `${threadType}:${threadId}`;
-      
+
       await socket.leave(roomName);
-      logger.info(`User ${socket.userId} left thread ${threadId} of type ${threadType}`);
+      logger.info(
+        `User ${socket.userId} left thread ${threadId} of type ${threadType}`
+      );
     } catch (error) {
-      logger.error('Error leaving thread:', error);
-      socket.emit('error', { message: 'Failed to leave thread' });
+      logger.error("Error leaving thread:", error);
+      socket.emit("error", { message: "Failed to leave thread" });
     }
   });
 
   // Handle new comments
-  socket.on('new_comment', async (data) => {
+  socket.on("new_comment", async (data) => {
     try {
       // Apply rate limiting
       try {
         await rateLimiter.consume(socket.id);
       } catch (rateLimiterRes) {
-        socket.emit('error', { 
-          message: 'Rate limit exceeded', 
-          retryAfter: rateLimiterRes.msBeforeNext 
+        socket.emit("error", {
+          message: "Rate limit exceeded",
+          retryAfter: rateLimiterRes.msBeforeNext,
         });
         return;
       }
 
       const { error, value } = validateNewComment(data);
       if (error) {
-        socket.emit('error', { message: 'Invalid comment data', details: error.details });
+        socket.emit("error", {
+          message: "Invalid comment data",
+          details: error.details,
+        });
         return;
       }
 
       const comment = await commentManager.createComment({
         ...value,
         userId: socket.userId,
-        userInfo: socket.userInfo
+        userInfo: socket.userInfo,
       });
 
-      const parentComment = comment.parentId ? await commentManager.getComment(comment.parentId) : null;
+      const parentComment = comment.parentId
+        ? await commentManager.getComment(comment.parentId)
+        : null;
 
       // Broadcast to all users in the thread
       const roomName = `${comment.threadType}:${comment.threadId}`;
-      io.to(roomName).emit('comment_added', comment, parentComment);
+      io.to(roomName).emit("comment_added", comment, parentComment);
 
       // Create notifications for thread participants
-      await notificationManager.createCommentNotification(comment, socket.userId);
+      await notificationManager.createCommentNotification(
+        comment,
+        socket.userId
+      );
 
-      logger.info(`New comment created by user ${socket.userId}`, { commentId: comment.id });
+      logger.info(`New comment created by user ${socket.userId}`, {
+        commentId: comment.id,
+      });
     } catch (error) {
-      logger.error('Error creating comment:', error);
-      socket.emit('error', { message: 'Failed to create comment' });
+      logger.error("Error creating comment:", error);
+      socket.emit("error", { message: "Failed to create comment" });
     }
   });
 
   // Handle comment updates
-  socket.on('update_comment', async (data) => {
+  socket.on("update_comment", async (data) => {
     try {
       const { error, value } = validateUpdateComment(data);
       if (error) {
-        socket.emit('error', { message: 'Invalid update data', details: error.details });
+        socket.emit("error", {
+          message: "Invalid update data",
+          details: error.details,
+        });
         return;
       }
 
@@ -175,100 +201,117 @@ io.on('connection', (socket) => {
 
       if (updatedComment) {
         const roomName = `${updatedComment.threadType}:${updatedComment.threadId}`;
-        io.to(roomName).emit('comment_updated', updatedComment);
-        logger.info(`Comment ${value.commentId} updated by user ${socket.userId}`);
+        io.to(roomName).emit("comment_updated", updatedComment);
+        logger.info(
+          `Comment ${value.commentId} updated by user ${socket.userId}`
+        );
       } else {
-        socket.emit('error', { message: 'Comment not found or unauthorized' });
+        socket.emit("error", { message: "Comment not found or unauthorized" });
       }
     } catch (error) {
-      logger.error('Error updating comment:', error);
-      socket.emit('error', { message: 'Failed to update comment' });
+      logger.error("Error updating comment:", error);
+      socket.emit("error", { message: "Failed to update comment" });
     }
   });
 
   // Handle comment deletion
-  socket.on('delete_comment', async (data) => {
+  socket.on("delete_comment", async (data) => {
     try {
       const { error, value } = validateDeleteComment(data);
       if (error) {
-        socket.emit('error', { message: 'Invalid delete data', details: error.details });
+        socket.emit("error", {
+          message: "Invalid delete data",
+          details: error.details,
+        });
         return;
       }
 
-      const deletedComment = await commentManager.deleteComment(value.commentId, socket.userId);
+      const deletedComment = await commentManager.deleteComment(
+        value.commentId,
+        socket.userId
+      );
 
       if (deletedComment) {
         const roomName = `${deletedComment.threadType}:${deletedComment.threadId}`;
-        io.to(roomName).emit('comment_deleted', { commentId: value.commentId });
-        logger.info(`Comment ${value.commentId} deleted by user ${socket.userId}`);
+        io.to(roomName).emit("comment_deleted", { commentId: value.commentId });
+        logger.info(
+          `Comment ${value.commentId} deleted by user ${socket.userId}`
+        );
       } else {
-        socket.emit('error', { message: 'Comment not found or unauthorized' });
+        socket.emit("error", { message: "Comment not found or unauthorized" });
       }
     } catch (error) {
-      logger.error('Error deleting comment:', error);
-      socket.emit('error', { message: 'Failed to delete comment' });
+      logger.error("Error deleting comment:", error);
+      socket.emit("error", { message: "Failed to delete comment" });
     }
   });
 
   // Handle notification acknowledgment
-  socket.on('ack_notification', async (data) => {
+  socket.on("ack_notification", async (data) => {
     try {
       const { error, value } = validateAckNotification(data);
       if (error) {
-        socket.emit('error', { message: 'Invalid notification data', details: error.details });
+        socket.emit("error", {
+          message: "Invalid notification data",
+          details: error.details,
+        });
         return;
       }
 
       await notificationManager.markAsRead(value.notificationId, socket.userId);
-      logger.info(`Notification ${value.notificationId} acknowledged by user ${socket.userId}`);
+      logger.info(
+        `Notification ${value.notificationId} acknowledged by user ${socket.userId}`
+      );
     } catch (error) {
-      logger.error('Error acknowledging notification:', error);
-      socket.emit('error', { message: 'Failed to acknowledge notification' });
+      logger.error("Error acknowledging notification:", error);
+      socket.emit("error", { message: "Failed to acknowledge notification" });
     }
   });
 
   // Handle getting unread notifications
-  socket.on('get_notifications', async () => {
+  socket.on("get_notifications", async () => {
     try {
-      const notifications = await notificationManager.getUnreadNotifications(socket.userId);
-      socket.emit('notifications', notifications);
+      const notifications = await notificationManager.getUnreadNotifications(
+        socket.userId
+      );
+      socket.emit("notifications", notifications);
     } catch (error) {
-      logger.error('Error getting notifications:', error);
-      socket.emit('error', { message: 'Failed to get notifications' });
+      logger.error("Error getting notifications:", error);
+      socket.emit("error", { message: "Failed to get notifications" });
     }
   });
 
   // Handle typing indicators
-  socket.on('typing_start', (data) => {
+  socket.on("typing_start", (data) => {
     const { error, value } = validateTyping(data);
     if (error) return;
 
     const roomName = `${value.threadType}:${value.threadId}`;
-    socket.to(roomName).emit('user_typing', {
+    socket.to(roomName).emit("user_typing", {
       userId: socket.userId,
       userInfo: socket.userInfo,
       threadId: value.threadId,
-      threadType: value.threadType
+      threadType: value.threadType,
     });
   });
 
-  socket.on('typing_stop', (data) => {
+  socket.on("typing_stop", (data) => {
     const { error, value } = validateTyping(data);
     if (error) return;
 
     const roomName = `${value.threadType}:${value.threadId}`;
-    socket.to(roomName).emit('user_stopped_typing', {
+    socket.to(roomName).emit("user_stopped_typing", {
       userId: socket.userId,
       threadId: value.threadId,
-      threadType: value.threadType
+      threadType: value.threadType,
     });
   });
 
   // Handle disconnection
-  socket.on('disconnect', (reason) => {
+  socket.on("disconnect", (reason) => {
     logger.info(`Client disconnected: ${socket.id}`, {
       userId: socket.userId,
-      reason
+      reason,
     });
   });
 });
@@ -276,37 +319,45 @@ io.on('connection', (socket) => {
 // Validation schemas
 const joinThreadSchema = Joi.object({
   threadId: Joi.string().required(),
-  threadType: Joi.string().valid('post', 'article', 'discussion', 'task').required()
+  threadType: Joi.string()
+    .valid("post", "article", "discussion", "task")
+    .required(),
 });
 
 const leaveThreadSchema = Joi.object({
   threadId: Joi.string().required(),
-  threadType: Joi.string().valid('post', 'article', 'discussion', 'task').required()
+  threadType: Joi.string()
+    .valid("post", "article", "discussion", "task")
+    .required(),
 });
 
 const newCommentSchema = Joi.object({
   threadId: Joi.string().required(),
-  threadType: Joi.string().valid('post', 'article', 'discussion', 'task').required(),
+  threadType: Joi.string()
+    .valid("post", "article", "discussion", "task")
+    .required(),
   content: Joi.string().min(1).max(2000).required(),
-  parentId: Joi.string().optional()
+  parentId: Joi.string().optional(),
 });
 
 const updateCommentSchema = Joi.object({
   commentId: Joi.string().required(),
-  content: Joi.string().min(1).max(2000).required()
+  content: Joi.string().min(1).max(2000).required(),
 });
 
 const deleteCommentSchema = Joi.object({
-  commentId: Joi.string().required()
+  commentId: Joi.string().required(),
 });
 
 const ackNotificationSchema = Joi.object({
-  notificationId: Joi.string().required()
+  notificationId: Joi.string().required(),
 });
 
 const typingSchema = Joi.object({
   threadId: Joi.string().required(),
-  threadType: Joi.string().valid('post', 'article', 'discussion', 'task').required()
+  threadType: Joi.string()
+    .valid("post", "article", "discussion", "task")
+    .required(),
 });
 
 // Validation functions
@@ -339,21 +390,21 @@ function validateTyping(data) {
 }
 
 // Error handling
-process.on('uncaughtException', (error) => {
-  logger.error('Uncaught Exception:', error);
+process.on("uncaughtException", (error) => {
+  logger.error("Uncaught Exception:", error);
   process.exit(1);
 });
 
-process.on('unhandledRejection', (reason, promise) => {
-  logger.error('Unhandled Rejection at:', promise, 'reason:', reason);
+process.on("unhandledRejection", (reason, promise) => {
+  logger.error("Unhandled Rejection at:", promise, "reason:", reason);
   process.exit(1);
 });
 
 // Graceful shutdown
-process.on('SIGTERM', () => {
-  logger.info('SIGTERM received, shutting down gracefully...');
+process.on("SIGTERM", () => {
+  logger.info("SIGTERM received, shutting down gracefully...");
   server.close(() => {
-    logger.info('Server closed');
+    logger.info("Server closed");
     process.exit(0);
   });
 });
@@ -363,4 +414,4 @@ server.listen(PORT, () => {
   logger.info(`WebSocket server is running on port ${PORT}`);
 });
 
-module.exports = { app, server, io }; 
+module.exports = { app, server, io };
