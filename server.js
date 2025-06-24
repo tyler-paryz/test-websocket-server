@@ -19,7 +19,7 @@ const server = http.createServer(app);
 
 // Configure CORS
 const corsOptions = {
-  origin: process.env.CORS_ORIGIN || "http://localhost:3000",
+  origin: process.env.CORS_ORIGIN || "http://local.pendo.io:3000",
   methods: ["GET", "POST"],
   credentials: true
 };
@@ -60,7 +60,7 @@ app.get('/health', (req, res) => {
 });
 
 // Socket.IO connection handling
-io.use(authMiddleware.socketAuth);
+//io.use(authMiddleware.socketAuth);
 
 io.on('connection', (socket) => {
   logger.info(`Client connected: ${socket.id}`, {
@@ -82,13 +82,13 @@ io.on('connection', (socket) => {
 
       const { threadId, threadType } = value;
       const roomName = `${threadType}:${threadId}`;
-      
+
       await socket.join(roomName);
-      
+
       // Send existing comments for this thread
       const comments = await commentManager.getCommentsForThread(threadId, threadType);
       socket.emit('thread_comments', { threadId, threadType, comments });
-      
+
       logger.info(`User ${socket.userId} joined thread ${threadId} of type ${threadType}`);
     } catch (error) {
       logger.error('Error joining thread:', error);
@@ -107,7 +107,7 @@ io.on('connection', (socket) => {
 
       const { threadId, threadType } = value;
       const roomName = `${threadType}:${threadId}`;
-      
+
       await socket.leave(roomName);
       logger.info(`User ${socket.userId} left thread ${threadId} of type ${threadType}`);
     } catch (error) {
@@ -123,9 +123,9 @@ io.on('connection', (socket) => {
       try {
         await rateLimiter.consume(socket.id);
       } catch (rateLimiterRes) {
-        socket.emit('error', { 
-          message: 'Rate limit exceeded', 
-          retryAfter: rateLimiterRes.msBeforeNext 
+        socket.emit('error', {
+          message: 'Rate limit exceeded',
+          retryAfter: rateLimiterRes.msBeforeNext
         });
         return;
       }
@@ -361,4 +361,4 @@ server.listen(PORT, () => {
   logger.info(`WebSocket server is running on port ${PORT}`);
 });
 
-module.exports = { app, server, io }; 
+module.exports = { app, server, io };
