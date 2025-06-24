@@ -19,7 +19,7 @@ const server = http.createServer(app);
 
 // Configure CORS
 const corsOptions = {
-  origin: process.env.CORS_ORIGIN || "http://localhost:3000",
+  origin: process.env.CORS_ORIGIN || "https://local.pendo.io:3000",
   methods: ["GET", "POST"],
   credentials: true
 };
@@ -60,7 +60,7 @@ app.get('/health', (req, res) => {
 });
 
 // Socket.IO connection handling
-io.use(authMiddleware.socketAuth);
+//io.use(authMiddleware.socketAuth);
 
 io.on('connection', (socket) => {
   logger.info(`Client connected: ${socket.id}`, {
@@ -142,9 +142,11 @@ io.on('connection', (socket) => {
         userInfo: socket.userInfo
       });
 
+      const parentComment = comment.parentId ? await commentManager.getComment(comment.parentId) : null;
+
       // Broadcast to all users in the thread
       const roomName = `${comment.threadType}:${comment.threadId}`;
-      io.to(roomName).emit('comment_added', comment);
+      io.to(roomName).emit('comment_added', comment, parentComment);
 
       // Create notifications for thread participants
       await notificationManager.createCommentNotification(comment, socket.userId);
