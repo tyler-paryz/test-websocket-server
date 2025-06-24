@@ -4,14 +4,12 @@ const socketIo = require('socket.io');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('rate-limiter-flexible');
-const jwt = require('jsonwebtoken');
 const Joi = require('joi');
 require('dotenv').config();
 
 const logger = require('./utils/logger');
 const CommentManager = require('./services/CommentManager');
 const NotificationManager = require('./services/NotificationManager');
-const AuthMiddleware = require('./middleware/auth');
 
 // Initialize Express app
 const app = express();
@@ -19,7 +17,7 @@ const server = http.createServer(app);
 
 // Configure CORS
 const corsOptions = {
-  origin: process.env.CORS_ORIGIN || "http://local.pendo.io:3000",
+  origin: process.env.CORS_ORIGIN || "https://local.pendo.io:3000",
   methods: ["GET", "POST"],
   credentials: true
 };
@@ -47,7 +45,6 @@ const rateLimiter = new rateLimit.RateLimiterMemory({
 // Initialize managers
 const commentManager = new CommentManager();
 const notificationManager = new NotificationManager();
-const authMiddleware = new AuthMiddleware();
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -60,9 +57,38 @@ app.get('/health', (req, res) => {
 });
 
 // Socket.IO connection handling
-//io.use(authMiddleware.socketAuth);
+// JWT authentication disabled - accept all connections
 
 io.on('connection', (socket) => {
+  // Extract user info from socket handshake (no JWT required)
+  const userInfo = socket.handshake.auth?.user || socket.handshake.query?.user;
+  
+  if (userInfo && typeof userInfo === 'string') {
+    try {
+      // Parse JSON string if needed
+      socket.userInfo = JSON.parse(userInfo);
+      socket.userId = socket.userInfo.userId || socket.userInfo.id || socket.userInfo.userSnippylyId;
+    } catch (e) {
+      // If parsing fails, create basic user info
+      socket.userInfo = { username: userInfo, name: userInfo };
+      socket.userId = `user-${socket.id}`;
+    }
+  } else if (userInfo && typeof userInfo === 'object') {
+    // User info already parsed
+    socket.userInfo = userInfo;
+    socket.userId = userInfo.userId || userInfo.id || userInfo.userSnippylyId;
+  } else {
+    // No user info provided - create guest user
+    socket.userId = `guest-${socket.id}`;
+    socket.userInfo = {
+      id: socket.userId,
+      username: `Guest${socket.id.substring(0, 6)}`,
+      name: `Guest User`,
+      email: `guest@example.com`,
+      role: 'user'
+    };
+  }
+
   logger.info(`Client connected: ${socket.id}`, {
     userId: socket.userId,
     userInfo: socket.userInfo
@@ -262,6 +288,198 @@ io.on('connection', (socket) => {
     });
   });
 
+  // Handle getting comment threads (your required event)
+  socket.on('get_comment_threads', async (data) => {
+    try {
+      const { error, value } = validateGetCommentThreads(data);
+      if (error) {
+        socket.emit('error', { message: 'Invalid get threads data', details: error.details });
+        return;
+      }
+
+      const { itemId, user } = value;
+      
+      // Join the user to the item room so they can receive broadcasts
+      const roomName = `item:${itemId}`;
+      await socket.join(roomName);
+      
+      const threads = await commentManager.getCommentThreads(itemId, user);
+      socket.emit('comment_threads_updated', { threads });
+
+      logger.info(`Comment threads retrieved for item ${itemId}`, { 
+        userId: socket.userId,
+        roomName: roomName,
+        joinedRoom: true
+      });
+    } catch (error) {
+      logger.error('Error getting comment threads:', error);
+      socket.emit('error', { message: 'Failed to get comment threads' });
+    }
+  });
+
+  // Handle adding comment (your required event structure)
+  socket.on('add_comment', async (data) => {
+    try {
+      // Apply rate limiting
+      try {
+        await rateLimiter.consume(socket.id);
+      } catch (rateLimiterRes) {
+        socket.emit('error', {
+          message: 'Rate limit exceeded',
+          retryAfter: rateLimiterRes.msBeforeNext
+        });
+        return;
+      }
+
+      const { error, value } = validateAddComment(data);
+      if (error) {
+        socket.emit('error', { message: 'Invalid comment data', details: error.details });
+        return;
+      }
+
+      const { itemId, content, type, context, user } = value;
+      const comment = await commentManager.createCommentWithAnnotation({
+        itemId,
+        content,
+        type,
+        context,
+        user: user || socket.userInfo
+      });
+
+      // Get the full thread after adding comment
+      const thread = await commentManager.getCommentThread(comment.annotationId);
+
+      // Join the user to the item room FIRST (before broadcasting)
+      const roomName = `item:${itemId}`;
+      await socket.join(roomName);
+      
+      // Broadcast to all users in the item room
+      const broadcastData = {
+        annotationId: comment.annotationId,
+        comment: comment,
+        thread: thread
+      };
+      
+      // Debug: Log the exact data being sent to frontend
+      logger.info(`📋 Comment data being broadcast:`, {
+        commentId: comment.id,
+        userId: comment.userId,
+        username: comment.username,
+        name: comment.name,
+        email: comment.email,
+        userInfo: comment.userInfo,
+        hasUserInfo: !!comment.userInfo,
+        userInfoKeys: comment.userInfo ? Object.keys(comment.userInfo) : []
+      });
+      
+      io.to(roomName).emit('comment_added', broadcastData);
+      logger.info(`🚀 Broadcasting comment_added to room ${roomName}`, { 
+        event: 'comment_added',
+        roomName,
+        annotationId: comment.annotationId
+      });
+      
+      // Also emit directly to sender as fallback
+      socket.emit('comment_added', broadcastData);
+      logger.info(`📤 Emitting comment_added directly to sender ${socket.id}`);
+      
+      // Emit updated threads to all users in the room
+      const updatedThreads = await commentManager.getCommentThreads(itemId);
+      io.to(roomName).emit('comment_threads_updated', { threads: updatedThreads });
+      logger.info(`🔄 Broadcasting comment_threads_updated to room ${roomName}`, { 
+        event: 'comment_threads_updated',
+        threadsCount: updatedThreads.length
+      });
+
+      logger.info(`New comment added and broadcasted for item ${itemId}`, { 
+        annotationId: comment.annotationId,
+        userId: socket.userId,
+        roomName: roomName,
+        broadcastSent: true
+      });
+    } catch (error) {
+      logger.error('Error adding comment:', error);
+      socket.emit('error', { message: 'Failed to add comment' });
+    }
+  });
+
+  // Handle updating comment status (your required event)
+  socket.on('update_comment_status', async (data) => {
+    try {
+      const { error, value } = validateUpdateCommentStatus(data);
+      if (error) {
+        socket.emit('error', { message: 'Invalid status update data', details: error.details });
+        return;
+      }
+
+      const { annotationId, status, user } = value;
+      const updated = await commentManager.updateCommentStatus(
+        annotationId,
+        status,
+        user || socket.userInfo
+      );
+
+      if (updated) {
+        // Broadcast status update to all users in the annotation
+        const roomName = `annotation:${annotationId}`;
+        io.to(roomName).emit('comment_status_updated', {
+          annotationId,
+          status
+        });
+
+        logger.info(`Comment status updated for annotation ${annotationId}`, {
+          status,
+          userId: socket.userId
+        });
+      } else {
+        socket.emit('error', { message: 'Failed to update comment status' });
+      }
+    } catch (error) {
+      logger.error('Error updating comment status:', error);
+      socket.emit('error', { message: 'Failed to update comment status' });
+    }
+  });
+
+  // Handle adding reaction (your required event)
+  socket.on('add_reaction', async (data) => {
+    try {
+      const { error, value } = validateAddReaction(data);
+      if (error) {
+        socket.emit('error', { message: 'Invalid reaction data', details: error.details });
+        return;
+      }
+
+      const { annotationId, commentId, reaction, user } = value;
+      const reactionResult = await commentManager.addReaction(
+        annotationId,
+        commentId,
+        reaction,
+        user || socket.userInfo
+      );
+
+      if (reactionResult) {
+        // Broadcast reaction to all users in the annotation
+        const roomName = `annotation:${annotationId}`;
+        io.to(roomName).emit('reaction_added', {
+          annotationId,
+          commentId,
+          reaction: reactionResult
+        });
+
+        logger.info(`Reaction added to comment ${commentId}`, {
+          annotationId,
+          reaction: reaction,
+          userId: socket.userId
+        });
+      } else {
+        socket.emit('error', { message: 'Failed to add reaction' });
+      }
+    } catch (error) {
+      logger.error('Error adding reaction:', error);
+      socket.emit('error', { message: 'Failed to add reaction' });
+    }
+  });
+
   // Handle disconnection
   socket.on('disconnect', (reason) => {
     logger.info(`Client disconnected: ${socket.id}`, {
@@ -307,6 +525,33 @@ const typingSchema = Joi.object({
   threadType: Joi.string().valid('post', 'article', 'discussion', 'task').required()
 });
 
+// New validation schemas for your required events
+const getCommentThreadsSchema = Joi.object({
+  itemId: Joi.string().required(),
+  user: Joi.object().optional()
+});
+
+const addCommentSchema = Joi.object({
+  itemId: Joi.string().required(),
+  content: Joi.string().min(1).max(2000).required(),
+  type: Joi.string().optional(),
+  context: Joi.object().optional(),
+  user: Joi.object().optional()
+});
+
+const updateCommentStatusSchema = Joi.object({
+  annotationId: Joi.string().required(),
+  status: Joi.string().required(),
+  user: Joi.object().optional()
+});
+
+const addReactionSchema = Joi.object({
+  annotationId: Joi.string().required(),
+  commentId: Joi.string().required(),
+  reaction: Joi.string().required(),
+  user: Joi.object().optional()
+});
+
 // Validation functions
 function validateJoinThread(data) {
   return joinThreadSchema.validate(data);
@@ -334,6 +579,23 @@ function validateAckNotification(data) {
 
 function validateTyping(data) {
   return typingSchema.validate(data);
+}
+
+// New validation functions for your required events
+function validateGetCommentThreads(data) {
+  return getCommentThreadsSchema.validate(data);
+}
+
+function validateAddComment(data) {
+  return addCommentSchema.validate(data);
+}
+
+function validateUpdateCommentStatus(data) {
+  return updateCommentStatusSchema.validate(data);
+}
+
+function validateAddReaction(data) {
+  return addReactionSchema.validate(data);
 }
 
 // Error handling
