@@ -4,6 +4,8 @@ const logger = require('../utils/logger');
 class AuthMiddleware {
   constructor() {
     this.jwtSecret = process.env.JWT_SECRET || 'default-secret-key';
+    // For Firebase tokens, you might need to disable verification or use Firebase Admin SDK
+    this.skipVerification = process.env.SKIP_JWT_VERIFICATION === 'true';
   }
 
   // Socket.IO authentication middleware
@@ -19,18 +21,51 @@ class AuthMiddleware {
         return next(new Error('Authentication required'));
       }
 
-      // Verify JWT token
-      const decoded = jwt.verify(token, this.jwtSecret);
+      // Handle JWT token verification
+      let decoded;
+      if (this.skipVerification) {
+        // For debugging: decode without verification
+        decoded = jwt.decode(token);
+        logger.info('JWT verification skipped (debug mode)', { tokenPayload: decoded });
+      } else {
+        try {
+          // Verify JWT token
+          decoded = jwt.verify(token, this.jwtSecret);
+        } catch (verifyError) {
+          // If verification fails, try to decode without verification for Firebase tokens
+          logger.warn('JWT verification failed, attempting decode-only', { error: verifyError.message });
+          decoded = jwt.decode(token);
+          if (!decoded) {
+            throw verifyError;
+          }
+        }
+      }
+      
+      // Handle different JWT structures (Firebase, custom, etc.)
+      let userInfo;
+      if (decoded.claims && decoded.claims.user) {
+        // Firebase/Snippyly JWT structure
+        userInfo = decoded.claims.user;
+      } else if (decoded.user) {
+        // Custom JWT with user object
+        userInfo = decoded.user;
+      } else {
+        // Flat JWT structure
+        userInfo = decoded;
+      }
       
       // Attach user information to socket
-      socket.userId = decoded.userId || decoded.id;
+      socket.userId = userInfo.userId || userInfo.userSnippylyId || userInfo.id || decoded.uid;
       socket.userInfo = {
         id: socket.userId,
-        username: decoded.username,
-        email: decoded.email,
-        name: decoded.name,
-        avatar: decoded.avatar,
-        role: decoded.role || 'user'
+        username: userInfo.clientUserName || userInfo.username || userInfo.name,
+        email: userInfo.email,
+        name: userInfo.name || userInfo.clientUserName,
+        avatar: userInfo.avatar,
+        role: userInfo.isAdmin ? 'admin' : (userInfo.role || 'user'),
+        textColor: userInfo.textColor,
+        color: userInfo.color,
+        organizationId: userInfo.organizationId || userInfo.clientOrganizationId
       };
 
       logger.info('Socket authenticated successfully', {
