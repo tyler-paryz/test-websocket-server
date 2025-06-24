@@ -187,6 +187,7 @@ io.on("connection", (socket) => {
         userInfo: socket.userInfo,
       });
 
+      // Get parent comment if this is a reply
       const parentComment = comment.parentId
         ? await commentManager.getComment(comment.parentId)
         : null;
@@ -203,6 +204,9 @@ io.on("connection", (socket) => {
 
       logger.info(`New comment created by user ${socket.userId}`, {
         commentId: comment.id,
+        parentId: comment.parentId,
+        isReply: !!comment.parentId,
+        hasParentComment: !!parentComment,
       });
     } catch (error) {
       logger.error("Error creating comment:", error);
@@ -384,6 +388,11 @@ io.on("connection", (socket) => {
 
       const { error, value } = validateAddComment(data);
       if (error) {
+        logger.warn(`❌ Validation failed for add_comment`, {
+          receivedData: data,
+          validationErrors: error.details,
+          userId: socket.userId,
+        });
         socket.emit("error", {
           message: "Invalid comment data",
           details: error.details,
@@ -391,14 +400,106 @@ io.on("connection", (socket) => {
         return;
       }
 
-      const { itemId, content, type, context, user } = value;
-      const comment = await commentManager.createCommentWithAnnotation({
+      logger.info(`📥 Processing add_comment request`, {
+        data: value,
+        userId: socket.userId,
+        hasAnnotationId: !!value.annotationId,
+        hasItemId: !!value.itemId,
+        hasParentId: !!value.parentId,
+        type: value.type,
+      });
+
+      const {
         itemId,
+        annotationId,
         content,
         type,
         context,
+        user,
+        parentId,
+        isReply,
+        parentCommentId,
+        parentAnnotationId,
+      } = value;
+
+      // Check if this is a reply
+      const detectIsReply = isReply === true || type === "reply";
+
+      logger.info(`🔍 Reply detection`, {
+        isReply: detectIsReply,
+        type: type,
+        hasParentCommentId: !!parentCommentId,
+        hasParentAnnotationId: !!parentAnnotationId,
+        annotationId: annotationId,
+      });
+
+      let actualItemId = itemId;
+      let actualParentId = parentId;
+      let replyToAnnotationId = null;
+
+      if (detectIsReply) {
+        logger.info(`💬 Processing as reply to parent:`, {
+          parentCommentId: parentCommentId,
+          parentAnnotationId: parentAnnotationId || annotationId,
+        });
+
+        // For replies, use parentAnnotationId or annotationId to find the thread
+        const threadAnnotationId = parentAnnotationId || annotationId;
+        const thread = await commentManager.getCommentThread(
+          threadAnnotationId
+        );
+
+        if (thread && thread.comments.length > 0) {
+          // Get itemId from the first comment in the thread
+          actualItemId = thread.comments[0].itemId;
+
+          // Set parentId to the specific comment being replied to
+          actualParentId = parentCommentId || thread.comments[0].id;
+
+          // Keep the same annotation ID to add to existing thread
+          replyToAnnotationId = threadAnnotationId;
+
+          logger.info(`🔗 Reply thread found`, {
+            threadAnnotationId,
+            itemId: actualItemId,
+            parentId: actualParentId,
+            threadCommentsCount: thread.comments.length,
+          });
+        } else {
+          throw new Error(
+            `Thread not found for annotationId: ${threadAnnotationId}`
+          );
+        }
+      } else if (annotationId && !itemId) {
+        // Handle legacy case: when annotationId is provided for new thread
+        const thread = await commentManager.getCommentThread(annotationId);
+        if (thread && thread.comments.length > 0) {
+          actualItemId = thread.comments[0].itemId;
+
+          logger.info(`🔗 Converting annotationId to itemId`, {
+            annotationId,
+            itemId: actualItemId,
+          });
+        } else {
+          throw new Error(`Thread not found for annotationId: ${annotationId}`);
+        }
+      }
+
+      const comment = await commentManager.createCommentWithAnnotation({
+        itemId: actualItemId,
+        content,
+        type: detectIsReply ? "reply" : type || "comment",
+        context,
+        parentId: actualParentId,
+        replyToAnnotationId: replyToAnnotationId, // Use existing annotation if replying
+        isReply: detectIsReply,
         user: user || socket.userInfo,
       });
+
+      // Get parent comment if this is a reply
+      const parentComment = comment.parentId
+        ? await commentManager.getComment(comment.parentId)
+        : null;
 
       // Get the full thread after adding comment
       const thread = await commentManager.getCommentThread(
@@ -406,26 +507,43 @@ io.on("connection", (socket) => {
       );
 
       // Join the user to the item room FIRST (before broadcasting)
-      const roomName = `item:${itemId}`;
+      const roomName = `item:${actualItemId}`;
       await socket.join(roomName);
+
+      // Get updated threads early for logging
+      const updatedThreads = await commentManager.getCommentThreads(
+        actualItemId
+      );
+      const updatedThread = updatedThreads.find(
+        (t) => t.annotationId === comment.annotationId
+      );
 
       // Broadcast to all users in the item room
       const broadcastData = {
         annotationId: comment.annotationId,
         comment: comment,
         thread: thread,
+        parentComment: parentComment,
       };
 
       // Debug: Log the exact data being sent to frontend
       logger.info(`📋 Comment data being broadcast:`, {
         commentId: comment.id,
+        annotationId: comment.annotationId,
         userId: comment.userId,
         username: comment.username,
         name: comment.name,
         email: comment.email,
+        type: comment.type,
+        parentId: comment.parentId,
+        isReply: comment.isReply,
+        hasParentComment: !!parentComment,
+        parentCommentId: parentComment?.id,
+        threadAfterReply: updatedThread
+          ? updatedThread.comments.length
+          : "unknown",
         userInfo: comment.userInfo,
         hasUserInfo: !!comment.userInfo,
-        userInfoKeys: comment.userInfo ? Object.keys(comment.userInfo) : [],
       });
 
       io.to(roomName).emit("comment_added", broadcastData);
@@ -440,24 +558,41 @@ io.on("connection", (socket) => {
       logger.info(`📤 Emitting comment_added directly to sender ${socket.id}`);
 
       // Emit updated threads to all users in the room
-      const updatedThreads = await commentManager.getCommentThreads(itemId);
       io.to(roomName).emit("comment_threads_updated", {
         threads: updatedThreads,
       });
+
       logger.info(
         `🔄 Broadcasting comment_threads_updated to room ${roomName}`,
         {
           event: "comment_threads_updated",
           threadsCount: updatedThreads.length,
+          updatedThreadComments: updatedThread
+            ? updatedThread.comments.length
+            : 0,
+          isReply: comment.isReply,
         }
       );
 
-      logger.info(`New comment added and broadcasted for item ${itemId}`, {
-        annotationId: comment.annotationId,
-        userId: socket.userId,
-        roomName: roomName,
-        broadcastSent: true,
-      });
+      if (comment.isReply) {
+        logger.info(`🔄 Broadcasted thread update with replies:`, {
+          threadId: comment.annotationId,
+          commentsInThread: updatedThread ? updatedThread.comments.length : 0,
+          isReply: true,
+        });
+      }
+
+      logger.info(
+        `New comment added and broadcasted for item ${actualItemId}`,
+        {
+          annotationId: comment.annotationId,
+          userId: socket.userId,
+          roomName: roomName,
+          parentId: comment.parentId,
+          isReply: !!comment.parentId,
+          broadcastSent: true,
+        }
+      );
     } catch (error) {
       logger.error("Error adding comment:", error);
       socket.emit("error", { message: "Failed to add comment" });
@@ -607,12 +742,18 @@ const getCommentThreadsSchema = Joi.object({
 });
 
 const addCommentSchema = Joi.object({
-  itemId: Joi.string().required(),
+  itemId: Joi.string().optional(),
+  annotationId: Joi.string().optional(),
   content: Joi.string().min(1).max(2000).required(),
   type: Joi.string().optional(),
   context: Joi.object().optional(),
   user: Joi.object().optional(),
-});
+  parentId: Joi.string().optional(),
+  isReply: Joi.boolean().optional(),
+  parentCommentId: Joi.string().optional(),
+  parentAnnotationId: Joi.string().optional(),
+  threadId: Joi.string().optional(), // Allow threadId from frontend
+}).or("itemId", "annotationId"); // Require either itemId OR annotationId
 
 const updateCommentStatusSchema = Joi.object({
   annotationId: Joi.string().required(),

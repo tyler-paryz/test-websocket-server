@@ -263,9 +263,11 @@ class CommentManager {
 
   // Create comment with annotation support
   async createCommentWithAnnotation(data) {
-    const { itemId, content, type, context, user } = data;
+    const { itemId, content, type, context, user, parentId, replyToAnnotationId, isReply } = data;
     
-    const annotationId = uuidv4();
+    // If this is a reply to an existing annotation, use that annotationId
+    // Otherwise, create a new annotation
+    const annotationId = replyToAnnotationId || uuidv4();
     
     // Ensure user info has all required fields for frontend
     const normalizedUserInfo = {
@@ -292,6 +294,8 @@ class CommentManager {
       content,
       type: type || 'comment',
       context: context || {},
+      parentId: parentId || null,
+      isReply: isReply || false,
       userId: normalizedUserInfo.id,
       userInfo: normalizedUserInfo,
       // Add user fields directly to comment for easier access
@@ -318,10 +322,21 @@ class CommentManager {
     }
     this.threadComments.get(itemKey).add(comment.id);
 
+    // If this is a reply, add it to parent's replies
+    if (comment.parentId) {
+      const parentComment = this.comments.get(comment.parentId);
+      if (parentComment) {
+        parentComment.replies.push(comment.id);
+      }
+    }
+
     logger.info(`Comment with annotation created: ${comment.id}`, { 
       annotationId,
       itemId,
-      userId: user.userId || user.id
+      userId: user.userId || user.id,
+      isReply: !!parentId,
+      isNewAnnotation: !replyToAnnotationId,
+      replyToAnnotationId: replyToAnnotationId || null
     });
 
     return comment;
