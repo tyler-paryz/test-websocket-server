@@ -648,8 +648,17 @@ io.on("connection", (socket) => {
   // Handle adding reaction (your required event)
   socket.on("add_reaction", async (data) => {
     try {
+      logger.info(`📥 Processing add_reaction request`, {
+        data: data,
+        userId: socket.userId,
+      });
+
       const { error, value } = validateAddReaction(data);
       if (error) {
+        logger.warn(`❌ Validation failed for add_reaction`, {
+          receivedData: data,
+          validationErrors: error.details,
+        });
         socket.emit("error", {
           message: "Invalid reaction data",
           details: error.details,
@@ -658,26 +667,72 @@ io.on("connection", (socket) => {
       }
 
       const { annotationId, commentId, reaction, user } = value;
+      
+      // Extract emoji from reaction (handle both string and object formats)
+      const reactionEmoji = typeof reaction === 'string' ? reaction : reaction.emoji;
+      
+      logger.info(`🎯 Processing reaction:`, {
+        reactionInput: reaction,
+        extractedEmoji: reactionEmoji,
+        isObject: typeof reaction === 'object'
+      });
+      
       const reactionResult = await commentManager.addReaction(
         annotationId,
         commentId,
-        reaction,
+        reactionEmoji,
         user || socket.userInfo
       );
 
       if (reactionResult) {
-        // Broadcast reaction to all users in the annotation
-        const roomName = `annotation:${annotationId}`;
-        io.to(roomName).emit("reaction_added", {
+        // Get the updated comment to send complete reaction data
+        const updatedComment = await commentManager.getComment(commentId);
+        
+        // Convert reaction Sets to arrays and add counts for frontend
+        const formattedReactions = [];
+        if (updatedComment && updatedComment.reactions) {
+          Object.keys(updatedComment.reactions).forEach(reactionType => {
+            const users = Array.from(updatedComment.reactions[reactionType]);
+            if (users.length > 0) {
+              formattedReactions.push({
+                type: reactionType,
+                users: users,
+                count: users.length
+              });
+            }
+          });
+        }
+
+        // Find the item room to broadcast to (same as comments)
+        const comment = updatedComment;
+        const itemRoom = `item:${comment.itemId}`;
+        
+        // Broadcast reaction to all users in the item room
+        const broadcastData = {
           annotationId,
           commentId,
           reaction: reactionResult,
-        });
+          comment: {
+            ...comment,
+            reactions: formattedReactions // Send formatted reactions array
+          }
+        };
 
-        logger.info(`Reaction added to comment ${commentId}`, {
+        io.to(itemRoom).emit("reaction_added", broadcastData);
+        
+        // Also emit directly to sender as fallback
+        socket.emit("reaction_added", broadcastData);
+
+        logger.info(`✅ Reaction ${reactionEmoji} added to comment ${commentId}`, {
           annotationId,
-          reaction: reaction,
+          reactionType: reactionEmoji,
+          reactionName: typeof reaction === 'object' ? reaction.name : 'unknown',
           userId: socket.userId,
+          userDisplayName: reactionResult.userDisplayName,
+          reactionCount: reactionResult.count,
+          totalReactions: formattedReactions.length,
+          broadcastRoom: itemRoom,
+          usersWhoReacted: formattedReactions.find(r => r.type === reactionEmoji)?.users?.map(u => u.displayName) || []
         });
       } else {
         socket.emit("error", { message: "Failed to add reaction" });
@@ -772,7 +827,13 @@ const updateCommentStatusSchema = Joi.object({
 const addReactionSchema = Joi.object({
   annotationId: Joi.string().required(),
   commentId: Joi.string().required(),
-  reaction: Joi.string().required(),
+  reaction: Joi.alternatives().try(
+    Joi.string(), // Allow simple string like "👍"
+    Joi.object({  // Allow object like { emoji: "❤️", name: "heart" }
+      emoji: Joi.string().required(),
+      name: Joi.string().required()
+    })
+  ).required(),
   user: Joi.object().optional(),
 });
 

@@ -164,33 +164,46 @@ class CommentManager {
     if (!comment) return null;
 
     if (!comment.reactions[reactionType]) {
-      comment.reactions[reactionType] = new Set();
+      comment.reactions[reactionType] = new Map();
     }
+
+    const userInfo = {
+      id: userId,
+      username: 'Legacy User',
+      displayName: 'Legacy User'
+    };
 
     // Remove user from all other reactions for this comment
     Object.keys(comment.reactions).forEach(type => {
       if (type !== reactionType) {
-        comment.reactions[type].delete(userId);
+        if (comment.reactions[type] instanceof Map) {
+          comment.reactions[type].delete(userId);
+        } else if (comment.reactions[type] instanceof Set) {
+          comment.reactions[type].delete(userId);
+        }
       }
     });
 
     // Toggle the reaction
-    if (comment.reactions[reactionType].has(userId)) {
-      comment.reactions[reactionType].delete(userId);
+    if (comment.reactions[reactionType] instanceof Map) {
+      if (comment.reactions[reactionType].has(userId)) {
+        comment.reactions[reactionType].delete(userId);
+      } else {
+        comment.reactions[reactionType].set(userId, userInfo);
+      }
     } else {
-      comment.reactions[reactionType].add(userId);
+      // Convert legacy Set to Map
+      const legacyUsers = Array.from(comment.reactions[reactionType]);
+      comment.reactions[reactionType] = new Map();
+      legacyUsers.forEach(id => {
+        if (id !== userId) {
+          comment.reactions[reactionType].set(id, { id, username: 'Legacy User', displayName: 'Legacy User' });
+        }
+      });
+      comment.reactions[reactionType].set(userId, userInfo);
     }
 
-    // Convert Sets to arrays for JSON serialization
-    const reactionsForResponse = {};
-    Object.keys(comment.reactions).forEach(type => {
-      reactionsForResponse[type] = Array.from(comment.reactions[type]);
-    });
-
-    return {
-      ...comment,
-      reactions: reactionsForResponse
-    };
+    return this.formatCommentForFrontend(comment);
   }
 
   async getThreadParticipants(threadId, threadType) {
@@ -239,6 +252,48 @@ class CommentManager {
 
   // NEW METHODS FOR YOUR FRONTEND REQUIREMENTS
 
+  // Helper method to format reactions for frontend
+  formatReactionsForFrontend(comment) {
+    const formattedReactions = [];
+    if (comment.reactions) {
+      Object.keys(comment.reactions).forEach(reactionType => {
+        let users = [];
+        
+        if (comment.reactions[reactionType] instanceof Map) {
+          // New format: Map with user objects
+          users = Array.from(comment.reactions[reactionType].values());
+        } else if (comment.reactions[reactionType] instanceof Set) {
+          // Legacy format: Set with just user IDs
+          users = Array.from(comment.reactions[reactionType]).map(userId => ({
+            id: userId,
+            username: 'Unknown User',
+            displayName: 'Unknown User'
+          }));
+        } else if (Array.isArray(comment.reactions[reactionType])) {
+          // Already an array (shouldn't happen but handle it)
+          users = comment.reactions[reactionType];
+        }
+        
+        if (users.length > 0) {
+          formattedReactions.push({
+            type: reactionType,
+            users: users,
+            count: users.length
+          });
+        }
+      });
+    }
+    return formattedReactions;
+  }
+
+  // Helper method to format a comment for frontend
+  formatCommentForFrontend(comment) {
+    return {
+      ...comment,
+      reactions: this.formatReactionsForFrontend(comment)
+    };
+  }
+
   // Get comment threads for an item
   async getCommentThreads(itemId, user) {
     const itemKey = `item:${itemId}`;
@@ -255,7 +310,7 @@ class CommentManager {
         if (!annotationMap.has(annotationId)) {
           annotationMap.set(annotationId, []);
         }
-        annotationMap.get(annotationId).push(comment);
+        annotationMap.get(annotationId).push(this.formatCommentForFrontend(comment));
       }
     });
 
@@ -361,7 +416,7 @@ class CommentManager {
 
     this.comments.forEach(comment => {
       if (comment.annotationId === annotationId && !comment.isDeleted) {
-        comments.push(comment);
+        comments.push(this.formatCommentForFrontend(comment));
       }
     });
 
@@ -403,42 +458,67 @@ class CommentManager {
       return null;
     }
 
+    // Initialize reaction storage as Map to store user objects
     if (!comment.reactions[reactionType]) {
-      comment.reactions[reactionType] = new Set();
+      comment.reactions[reactionType] = new Map();
     }
 
     const userId = user.userId || user.id;
+    const userInfo = {
+      id: userId,
+      username: user.username || user.clientUserName || 'Unknown User',
+      displayName: user.displayName || user.name || user.firstName + ' ' + user.lastName || user.username || 'Unknown User',
+      firstName: user.firstName || 'Unknown',
+      lastName: user.lastName || 'User'
+    };
 
-    // Toggle the reaction
-    if (comment.reactions[reactionType].has(userId)) {
+    // Check if user already has this reaction
+    const hasReaction = comment.reactions[reactionType].has(userId);
+
+    if (hasReaction) {
+      // Remove the reaction
       comment.reactions[reactionType].delete(userId);
     } else {
       // Remove user from all other reactions for this comment
       Object.keys(comment.reactions).forEach(type => {
-        if (type !== reactionType) {
+        if (type !== reactionType && comment.reactions[type] instanceof Map) {
           comment.reactions[type].delete(userId);
         }
       });
-      comment.reactions[reactionType].add(userId);
+      // Add the reaction with user info
+      comment.reactions[reactionType].set(userId, userInfo);
     }
 
     comment.updatedAt = new Date().toISOString();
 
-    // Convert Sets to arrays for JSON serialization
+    // Convert Maps to arrays for JSON serialization
     const reactionsForResponse = {};
     Object.keys(comment.reactions).forEach(type => {
-      reactionsForResponse[type] = Array.from(comment.reactions[type]);
+      if (comment.reactions[type] instanceof Map) {
+        reactionsForResponse[type] = Array.from(comment.reactions[type].values());
+      } else if (comment.reactions[type] instanceof Set) {
+        // Handle legacy Set format by converting to user objects
+        reactionsForResponse[type] = Array.from(comment.reactions[type]).map(id => ({
+          id: id,
+          username: 'Unknown User',
+          displayName: 'Unknown User'
+        }));
+      }
     });
 
     logger.info(`Reaction ${reactionType} toggled for comment ${commentId}`, {
       annotationId,
-      userId
+      userId,
+      userDisplayName: userInfo.displayName,
+      hasReaction: !hasReaction // inverted because we toggled it
     });
 
     return {
       type: reactionType,
       users: reactionsForResponse[reactionType],
-      userId
+      count: reactionsForResponse[reactionType].length,
+      userId,
+      userDisplayName: userInfo.displayName
     };
   }
 }
