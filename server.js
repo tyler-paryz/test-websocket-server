@@ -226,10 +226,12 @@ io.on("connection", (socket) => {
         return;
       }
 
+      logger.info(value.commentId)
+
       const updatedComment = await commentManager.updateComment(
         value.commentId,
         value.content,
-        socket.userId
+        value.user.id
       );
 
       if (updatedComment) {
@@ -250,8 +252,12 @@ io.on("connection", (socket) => {
   // Handle comment deletion
   socket.on("delete_comment", async (data) => {
     try {
+        logger.info('data', data)
       const { error, value } = validateDeleteComment(data);
       if (error) {
+          logger.info(
+            `error ${error}`
+          );
         socket.emit("error", {
           message: "Invalid delete data",
           details: error.details,
@@ -261,12 +267,12 @@ io.on("connection", (socket) => {
 
       const deletedComment = await commentManager.deleteComment(
         value.commentId,
-        socket.userId
+        value.user.id
       );
 
       if (deletedComment) {
         const roomName = `${deletedComment.threadType}:${deletedComment.threadId}`;
-        io.to(roomName).emit("comment_deleted", { commentId: value.commentId });
+        io.to(roomName).emit("comment_deleted", deletedComment);
         logger.info(
           `Comment ${value.commentId} deleted by user ${socket.userId}`
         );
@@ -718,10 +724,12 @@ const newCommentSchema = Joi.object({
 const updateCommentSchema = Joi.object({
   commentId: Joi.string().required(),
   content: Joi.string().min(1).max(2000).required(),
+  user: Joi.object().optional()
 });
 
 const deleteCommentSchema = Joi.object({
   commentId: Joi.string().required(),
+  user: Joi.object().optional()
 });
 
 const ackNotificationSchema = Joi.object({

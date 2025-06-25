@@ -19,7 +19,7 @@ class CommentManager {
       userInfo: commentData.userInfo,
       parentId: commentData.parentId || null,
       createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+      updatedAt: null,
       isDeleted: false,
       reactions: {},
       replies: []
@@ -43,27 +43,23 @@ class CommentManager {
       }
     }
 
-    logger.info(`Comment created: ${comment.id}`, { 
-      threadId: comment.threadId, 
-      userId: comment.userId 
-    });
-
     return comment;
   }
 
-  async updateComment(commentId, newContent, userId) {
-    const comment = this.comments.get(commentId);
-    
+    async updateComment(commentId, newContent, userId) {
+        const comment = this.comments.get(commentId);
+
+
     if (!comment) {
       logger.warn(`Comment not found: ${commentId}`);
       return null;
     }
 
     if (comment.userId !== userId) {
-      logger.warn(`Unauthorized comment update attempt`, { 
-        commentId, 
-        userId, 
-        commentUserId: comment.userId 
+      logger.warn(`Unauthorized comment update attempt`, {
+        commentId,
+        userId,
+        commentUserId: comment.userId
       });
       return null;
     }
@@ -71,23 +67,24 @@ class CommentManager {
     comment.content = newContent;
     comment.updatedAt = new Date().toISOString();
 
+    logger.info('test', { comment })
+
     logger.info(`Comment updated: ${commentId}`, { userId });
     return comment;
   }
 
   async deleteComment(commentId, userId) {
     const comment = this.comments.get(commentId);
-    
     if (!comment) {
       logger.warn(`Comment not found: ${commentId}`);
       return null;
     }
 
     if (comment.userId !== userId) {
-      logger.warn(`Unauthorized comment deletion attempt`, { 
-        commentId, 
-        userId, 
-        commentUserId: comment.userId 
+      logger.warn(`Unauthorized comment deletion attempt`, {
+        commentId,
+        userId,
+        commentUserId: comment.userId
       });
       return null;
     }
@@ -97,14 +94,30 @@ class CommentManager {
     comment.content = '[Comment deleted]';
     comment.updatedAt = new Date().toISOString();
 
+    logger.info('replies', { comment })
+
+    if(comment.replies.length > 0) {
+        for(let reply of comment.replies) {
+            const replyToDelete = this.comments.get(reply)
+
+            replyToDelete.isDeleted = true
+            replyToDelete.content = '[Comment deleted]';
+            replyToDelete.updatedAt = new Date().toISOString();
+
+            logger.info(`Comment deleted: ${replyToDelete}`, { replyToDelete });
+
+        }
+
+    }
+
     logger.info(`Comment deleted: ${commentId}`, { userId });
-    return comment;
+    return this.comments;
   }
 
   async getCommentsForThread(threadId, threadType, limit = 50, offset = 0) {
     const threadKey = `${threadType}:${threadId}`;
     const commentIds = this.threadComments.get(threadKey);
-    
+
     if (!commentIds) {
       return [];
     }
@@ -183,7 +196,7 @@ class CommentManager {
   async getThreadParticipants(threadId, threadType) {
     const threadKey = `${threadType}:${threadId}`;
     const commentIds = this.threadComments.get(threadKey);
-    
+
     if (!commentIds) {
       return [];
     }
@@ -203,7 +216,7 @@ class CommentManager {
   async getThreadStats(threadId, threadType) {
     const threadKey = `${threadType}:${threadId}`;
     const commentIds = this.threadComments.get(threadKey);
-    
+
     if (!commentIds) {
       return { totalComments: 0, participants: 0, lastActivity: null };
     }
@@ -213,8 +226,8 @@ class CommentManager {
       .filter(comment => comment && !comment.isDeleted);
 
     const participants = new Set(comments.map(c => c.userId));
-    const lastActivity = comments.length > 0 
-      ? Math.max(...comments.map(c => new Date(c.updatedAt).getTime()))
+    const lastActivity = comments.length > 0
+      ? Math.max(...comments.map(c => new Date(c.updatedAt || c.createdAt).getTime()))
       : null;
 
     return {
@@ -230,7 +243,7 @@ class CommentManager {
   async getCommentThreads(itemId, user) {
     const itemKey = `item:${itemId}`;
     const commentIds = this.threadComments.get(itemKey) || new Set();
-    
+
     const threads = [];
     const annotationMap = new Map();
 
@@ -264,11 +277,11 @@ class CommentManager {
   // Create comment with annotation support
   async createCommentWithAnnotation(data) {
     const { itemId, content, type, context, user, parentId, replyToAnnotationId, isReply } = data;
-    
+
     // If this is a reply to an existing annotation, use that annotationId
     // Otherwise, create a new annotation
     const annotationId = replyToAnnotationId || uuidv4();
-    
+
     // Ensure user info has all required fields for frontend
     const normalizedUserInfo = {
       id: user.userId || user.userSnippylyId || user.id,
@@ -284,7 +297,7 @@ class CommentManager {
       organizationId: user.organizationId || user.clientOrganizationId,
       userSnippylyId: user.userSnippylyId
     };
-    
+
     const comment = {
       id: uuidv4(),
       annotationId,
@@ -306,7 +319,7 @@ class CommentManager {
       lastName: normalizedUserInfo.lastName,
       status: 'open',
       createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+      updatedAt: null,
       isDeleted: false,
       reactions: {},
       replies: []
@@ -330,7 +343,7 @@ class CommentManager {
       }
     }
 
-    logger.info(`Comment with annotation created: ${comment.id}`, { 
+    logger.info(`Comment with annotation created: ${comment.id}`, {
       annotationId,
       itemId,
       userId: user.userId || user.id,
@@ -345,7 +358,7 @@ class CommentManager {
   // Get a specific comment thread by annotation ID
   async getCommentThread(annotationId) {
     const comments = [];
-    
+
     this.comments.forEach(comment => {
       if (comment.annotationId === annotationId && !comment.isDeleted) {
         comments.push(comment);
@@ -362,7 +375,7 @@ class CommentManager {
   // Update comment status
   async updateCommentStatus(annotationId, status, user) {
     let updated = false;
-    
+
     this.comments.forEach(comment => {
       if (comment.annotationId === annotationId) {
         comment.status = status;
@@ -372,7 +385,7 @@ class CommentManager {
     });
 
     if (updated) {
-      logger.info(`Comment status updated for annotation ${annotationId}`, { 
+      logger.info(`Comment status updated for annotation ${annotationId}`, {
         status,
         userId: user.userId || user.id
       });
@@ -384,7 +397,7 @@ class CommentManager {
   // Add reaction to a comment
   async addReaction(annotationId, commentId, reactionType, user) {
     const comment = this.comments.get(commentId);
-    
+
     if (!comment || comment.annotationId !== annotationId) {
       logger.warn(`Comment not found or annotation mismatch: ${commentId}, ${annotationId}`);
       return null;
@@ -395,7 +408,7 @@ class CommentManager {
     }
 
     const userId = user.userId || user.id;
-    
+
     // Toggle the reaction
     if (comment.reactions[reactionType].has(userId)) {
       comment.reactions[reactionType].delete(userId);
@@ -417,7 +430,7 @@ class CommentManager {
       reactionsForResponse[type] = Array.from(comment.reactions[type]);
     });
 
-    logger.info(`Reaction ${reactionType} toggled for comment ${commentId}`, { 
+    logger.info(`Reaction ${reactionType} toggled for comment ${commentId}`, {
       annotationId,
       userId
     });
@@ -430,4 +443,4 @@ class CommentManager {
   }
 }
 
-module.exports = CommentManager; 
+module.exports = CommentManager;
